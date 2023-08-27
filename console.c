@@ -13,7 +13,7 @@
 
 #include "console.h"
 #include "report.h"
-#include "web.h"
+#include "tiny.h"
 
 /* Some global values */
 int simulation = 0;
@@ -33,18 +33,18 @@ static double first_time, last_time;
  * Must create stack of buffers to handle I/O with nested source commands.
  */
 
-#define RIO_BUFSIZE 8192
+#define __RIO_BUFSIZE 8192
 
 typedef struct __rio {
-    int fd;                /* File descriptor */
-    int count;             /* Unread bytes in internal buffer */
-    char *bufptr;          /* Next unread byte in internal buffer */
-    char buf[RIO_BUFSIZE]; /* Internal buffer */
-    struct __rio *prev;    /* Next element in stack */
-} rio_t;
+    int fd;                  /* File descriptor */
+    int count;               /* Unread bytes in internal buffer */
+    char *bufptr;            /* Next unread byte in internal buffer */
+    char buf[__RIO_BUFSIZE]; /* Internal buffer */
+    struct __rio *prev;      /* Next element in stack */
+} __rio_t;
 
-static rio_t *buf_stack;
-static char linebuf[RIO_BUFSIZE];
+static __rio_t *buf_stack;
+static char linebuf[__RIO_BUFSIZE];
 
 /* Maximum file descriptor */
 static int fd_max = 0;
@@ -392,7 +392,7 @@ static bool do_time(int argc, char *argv[])
 }
 
 static bool use_linenoise = true;
-static int web_fd;
+int web_fd;
 
 static bool do_web(int argc, char *argv[])
 {
@@ -402,8 +402,10 @@ static bool do_web(int argc, char *argv[])
             port = atoi(argv[1]);
     }
 
-    web_fd = web_open(port);
+    web_fd = open_listenfd(port);
     if (web_fd > 0) {
+        int flags = fcntl(web_fd, F_GETFL);
+        fcntl(web_fd, F_SETFL, flags | O_NONBLOCK);
         printf("listen on port %d, fd is %d\n", port, web_fd);
         use_linenoise = false;
     } else {
@@ -456,7 +458,7 @@ static bool push_file(char *fname)
     if (fd > fd_max)
         fd_max = fd;
 
-    rio_t *rnew = malloc_or_fail(sizeof(rio_t), "push_file");
+    __rio_t *rnew = malloc_or_fail(sizeof(__rio_t), "push_file");
     rnew->fd = fd;
     rnew->count = 0;
     rnew->bufptr = rnew->buf;
@@ -470,10 +472,10 @@ static bool push_file(char *fname)
 static void pop_file()
 {
     if (buf_stack) {
-        rio_t *rsave = buf_stack;
+        __rio_t *rsave = buf_stack;
         buf_stack = rsave->prev;
         close(rsave->fd);
-        free_block(rsave, sizeof(rio_t));
+        free_block(rsave, sizeof(__rio_t));
     }
 }
 
@@ -494,10 +496,11 @@ static char *readline()
     if (!buf_stack)
         return NULL;
 
-    for (int cnt = 0; cnt < RIO_BUFSIZE - 2; cnt++) {
+    for (int cnt = 0; cnt < __RIO_BUFSIZE - 2; cnt++) {
         if (buf_stack->count <= 0) {
             /* Need to read from input file */
-            buf_stack->count = read(buf_stack->fd, buf_stack->buf, RIO_BUFSIZE);
+            buf_stack->count =
+                read(buf_stack->fd, buf_stack->buf, __RIO_BUFSIZE);
             buf_stack->bufptr = buf_stack->buf;
             if (buf_stack->count <= 0) {
                 /* Encountered EOF */
@@ -616,9 +619,7 @@ static int cmd_select(int nfds,
         web_connfd =
             accept(web_fd, (struct sockaddr *) &clientaddr, &clientlen);
 
-        char *p = web_recv(web_connfd, &clientaddr);
-        char *buffer = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n";
-        web_send(web_connfd, buffer);
+        char *p = process(web_connfd, &clientaddr);
 
         if (p)
             interpret_cmd(p);

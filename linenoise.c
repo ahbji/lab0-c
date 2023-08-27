@@ -110,12 +110,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 
+#include "console.h"
 #include "linenoise.h"
+#include "tiny.h"
 
 #define LINENOISE_DEFAULT_HISTORY_MAX_LEN 100
 #define LINENOISE_MAX_LINE 4096
@@ -932,9 +935,43 @@ static int line_edit(int stdin_fd,
         int nread;
         char seq[5];
 
-        nread = read(l.ifd, &c, 1);
-        if (nread <= 0)
-            return l.len;
+        if (web_fd) {
+            fd_set set;
+            FD_ZERO(&set);
+            FD_SET(web_fd, &set);
+            FD_SET(stdin_fd, &set);
+
+            int rv = select(web_fd + 1, &set, NULL, NULL, NULL);
+            struct sockaddr_in clientaddr;
+            socklen_t clientlen = sizeof clientaddr;
+
+            switch (rv) {
+            case -1:
+                perror("select"); /* an error occurred */
+                continue;
+            case 0:
+                printf("timeout occurred\n"); /* a timeout occurred */
+                continue;
+            default:
+                if (FD_ISSET(web_fd, &set)) {
+                    int connfd = accept(web_fd, (SA *) &clientaddr, &clientlen);
+                    char *p = process(connfd, &clientaddr);
+                    strncpy(buf, p, strlen(p) + 1);
+                    close(connfd);
+                    free(p);
+                    return strlen(p);
+                } else if (FD_ISSET(stdin_fd, &set)) {
+                    nread = read(l.ifd, &c, 1);
+                    if (nread <= 0)
+                        return l.len;
+                }
+                break;
+            }
+        } else {
+            nread = read(l.ifd, &c, 1);
+            if (nread <= 0)
+                return l.len;
+        }
 
         /* Only autocomplete when the callback is set. It returns < 0 when
          * there was an error reading from fd. Otherwise it will return the
